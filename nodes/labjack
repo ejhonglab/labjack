@@ -3,6 +3,7 @@
 from __future__ import print_function
 
 import os
+import sys
 
 import rospy
 
@@ -11,10 +12,6 @@ from labjack import stream_to_csv
 
 def main():
     rospy.init_node('labjack')
-
-    # TODO is this necessary for params to be guaranteed to be set?
-    # delete if not.
-    #rospy.sleep(1.0)
 
     param_ns = 'labjack/'
     input_channels = rospy.get_param(param_ns + 'input_channels', [0])
@@ -30,7 +27,6 @@ def main():
             int(k): v for k, v in input_channel_names.items()
         }
 
-    # TODO maybe also allow this to reference another parameter?
     duration_s = rospy.get_param(param_ns + 'duration_s', None)
 
     csv_path = rospy.get_param(param_ns + 'csv_filename', 'labjack.csv')
@@ -38,9 +34,31 @@ def main():
     csv_dir_rosparam = rospy.get_param(param_ns + 'csv_dir_rosparam', None)
 
     if csv_dir_rosparam is not None:
-        csv_dir = rospy.get_param(csv_dir_rosparam)
+        #csv_dir = rospy.get_param(csv_dir_rosparam)
+        sleep_interval_s = 1.0
+        timeout_s = 45.0
+        total_slept_s = 0.0
+        while True:
+            try:
+                csv_dir = rospy.get_param(csv_dir_rosparam)
+                break
+            except KeyError:
+                rospy.sleep(sleep_interval_s)
+                total_slept_s += sleep_interval_s
+                if total_slept_s >= timeout_s:
+                    rospy.logfatal(('timeout ({:.1f}s) reached without ROS '
+                        'param {} becoming available').format(
+                        timeout_s, csv_dir_rosparam
+                    ))
+                    sys.exit()
+
         if csv_dir is not None:
-            assert os.path.isdir(csv_dir)
+            #assert os.path.isdir(csv_dir)
+            # since something needs to make this path in the nagel.py
+            # stimuli_only:=True pid:=True case...
+            if not os.path.exists(csv_dir):
+                os.mkdir(csv_dir)
+
             csv_path = os.path.join(csv_dir, csv_path)
 
     stream_to_csv(csv_path, duration_s=duration_s,

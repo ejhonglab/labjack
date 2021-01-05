@@ -7,6 +7,8 @@ import os
 import traceback
 from datetime import datetime
 import warnings
+import atexit
+import signal
 import math
 import csv
 
@@ -14,10 +16,6 @@ import numpy as np
 from LabJackPython import Device
 import u3
 
-
-# TODO TODO probably provide cleanup function, so ROS wrapper of stream-to-csv
-# script can have this cleanup called when ROS is shutdown?
-# (probably need u3 object to be global to achieve this)
 
 # From table 3.2-1 with resolutions and cognate max stream scan frequencies.
 # Maximum scan frequencies are in samples/s (shared across all channels).
@@ -127,16 +125,12 @@ def stream_to_csv(csv_path, duration_s=None, input_channels=None,
 
     verbose (bool): If `True`, will print more output. Defaults to `False`.
     """
-    # TODO ros parameter for this (w/ this probably the default).
-    # maybe just make settable in ROS wrapper, and just make kwarg here.
     # TODO also allow use of FIO<4-7> inputs? configure as inputs, etc.
     # `int` in [0, 3]. Should correspond to AIN[0-3] labels on U3-HV.
     if input_channels is None:
         input_channels = [0]
     # TODO print string label of each of above channels on particular hardware.
     # maybe assert hardware is HV version, if accessible via API.
-
-    # TODO also thread resolution_index through to ROS param
 
     if duration_s is not None:
         if duration_s <= 0:
@@ -152,6 +146,7 @@ def stream_to_csv(csv_path, duration_s=None, input_channels=None,
     scan_frequency = max_scan_freq / len(input_channels)
 
     d = u3.U3()
+    atexit.register(d.close)
 
     # To learn the if the U3 is an HV
     d.configU3()
@@ -190,6 +185,8 @@ def stream_to_csv(csv_path, duration_s=None, input_channels=None,
     request_s = samples_per_request * (1 / max_scan_freq)
     if duration_s is not None:
         n_requests = int(math.ceil(duration_s / request_s))
+    else:
+        n_requests = None
 
     # Time it takes to sample all the requested input channels.
     all_channel_sample_dt = 1 / scan_frequency
@@ -257,131 +254,138 @@ def stream_to_csv(csv_path, duration_s=None, input_channels=None,
     else:
         open_kwargs = dict()
 
-    with open(csv_path, 'w', **open_kwargs) as csv_file_handle:
-        csv_writer = csv.DictWriter(csv_file_handle, fieldnames=column_names)
-        csv_writer.writeheader()
+    csv_file_handle = open(csv_path, 'w', **open_kwargs)
+    atexit.register(csv_file_handle.close)
 
-        try:
-            if verbose:
-                print("Start stream")
-            d.streamStart()
-            start = datetime.now()
-            if verbose:
-                print("Start time is %s" % start)
+    csv_writer = csv.DictWriter(csv_file_handle, fieldnames=column_names)
+    csv_writer.writeheader()
 
-            missed = 0
-            request_count = 0
-            packet_count = 0
+    # Without *both* of these global definitions, _finish_up changes inside the
+    # signal handler won't apply to the instance of this variable defined
+    # outside of the handler. If this were Python3, I could probably use
+    # nonlocal instead.
+    # Initially I thought the `init_node` call in the wrapper would need
+    # `disable_signals=True` in order for this to work, but this handler does
+    # indeed work without that kwarg. I suppose it's happening in addition to
+    # ROS signal handling?
+    global _finish_up
+    _finish_up = False
+    def signal_shutdown(sig, frame):
+        global _finish_up
+        _finish_up = True
 
-            # This calls <d>.processStreamData internally, to apply calibration.
-            for r in d.streamData():
-                if r is not None:
-                    if n_requests is not None and request_count >= n_requests:
-                        break
+    signal.signal(signal.SIGINT, signal_shutdown)
 
-                    if r["errors"] != 0:
-                        warnings.warn("Errors counted: {} ; {}".format(
-                            r["errors"], datetime.now()
-                        ))
+    d.streamStart()
+    atexit.register(d.streamStop)
 
-                    if r["numPackets"] != d.packetsPerRequest:
-                        warnings.warn("----- UNDERFLOW : {} ; {}".format(
-                              r["numPackets"], datetime.now()
-                        ))
+    if verbose:
+        start = datetime.now()
+        print("Start time is %s" % start)
 
-                    if r["missed"] != 0:
-                        missed += r['missed']
-                        warnings.warn("+++ Missed {}".format(r["missed"]))
-
-                    # TODO only data not used is 'firstPacket':
-                    # "The PacketCounter value in the first USB packet."
-                    # is this useful? how?
-
-                    # TODO probably warn (first time) if `r` comes back with
-                    # more keys than those we expect from `channel_names`
-                    # (after removing the keys that are always there from
-                    # consideration)
-                    # TODO also test that channel_names agree w/ contents of `r`
-                    # for the FIO<x> pins on U3-HV
-
-                    row_data_lists = [r[s] for s in channel_names]
-
-                    if time_col:
-                        row_data_lists = \
-                            [list(request_times + last_time_s)] + row_data_lists
-                        last_time_s += request_s
-
-                    row_dicts = [dict(zip(column_names, row))
-                        for row in zip(*tuple(row_data_lists))
-                    ]
-                    # TODO need to take any particular care that shutdown
-                    # doesn't happen in the middle of one of these calls?
-                    # anything that even could be done?
-                    csv_writer.writerows(row_dicts)
-
-                    request_count += 1
-                    packet_count += r['numPackets']
-                else:
-                    # Got no data back from our read.
-                    # This only happens if your stream isn't faster than the USB
-                    # read timeout, ~1 sec.
-                    # TODO should i be warning in this case?
-                    print("No data ; {}".format(datetime.now()))
-
-        # TODO what kind of exception is this intended to catch?
-        # (and which lines can raise them?)
-        except:
-            # TODO print to stderr
-            print("".join(i for i in traceback.format_exc()))
-
-        # TODO TODO also trigger this cleanup if ROS gets shutdown (to not need
-        # to separately specify recording duration here, if specified elsewhere)
-        finally:
-            stop = datetime.now()
-            d.streamStop()
-            if verbose:
-                print("Stream stopped.\n")
-            d.close()
-
-            if verbose:
-                sampleTotal = packet_count * d.streamSamplesPerPacket
-
-                scanTotal = sampleTotal / len(input_channels)
-                print("%s requests with %s packets per request with %s samples "
-                    "per packet = %s samples total." % (request_count,
-                    (float(packet_count)/request_count),
-                    d.streamSamplesPerPacket, sampleTotal
+    missed = 0
+    request_count = 0
+    packet_count = 0
+    for r in d.streamData():
+        if r is not None:
+            if r["errors"] != 0:
+                warnings.warn("Errors counted: {} ; {}".format(
+                    r["errors"], datetime.now()
                 ))
-                print("%s samples were lost due to errors." % missed)
-                sampleTotal -= missed
-                print("Adjusted number of samples = %s" % sampleTotal)
 
-                print('sampleTotal * all_channel_sample_dt = ',
-                    sampleTotal * all_channel_sample_dt
-                )
+            if r["numPackets"] != d.packetsPerRequest:
+                warnings.warn("----- UNDERFLOW : {} ; {}".format(
+                      r["numPackets"], datetime.now()
+                ))
 
-                runTime = ((stop-start).seconds +
-                    float((stop-start).microseconds) / 1000000
-                )
-                # TODO why does this difference seem to depend on
-                # actual_duration_s?  does that mean that the timing between
-                # samples is wrong in some places, or just that the startup /
-                # shutdown of the stream takes longer in some cases? how to
-                # test? maybe measure a reference square wave ~2-4x slower than
-                # sample rate?
-                print('runTime - actual_duration_s:',
-                    runTime - actual_duration_s
-                )
-                print("The experiment took %s seconds." % runTime)
-                print("Actual Scan Rate = %s Hz" % scan_frequency)
-                # TODO TODO what causes discrepancies between these and
-                # requested scan rate? should i warn if there's enough of a
-                # difference? important? any offset between values yielded by
-                # streamData, or just at beginning / end?
-                print("Timed Scan Rate = %s scans / %s seconds = %s Hz" %
-                      (scanTotal, runTime, float(scanTotal)/runTime))
-                print("Timed Sample Rate = %s samples / %s seconds = %s Hz" %
-                      (sampleTotal, runTime, float(sampleTotal)/runTime))
+            if r["missed"] != 0:
+                missed += r['missed']
+                warnings.warn("+++ Missed {}".format(r["missed"]))
+
+            # TODO only data not used is 'firstPacket':
+            # "The PacketCounter value in the first USB packet."
+            # is this useful? how?
+
+            # TODO probably warn (first time) if `r` comes back with more keys
+            # than those we expect from `channel_names` (after removing the keys
+            # that are always there from consideration)
+            # TODO also test that channel_names agree w/ contents of `r` for the
+            # FIO<x> pins on U3-HV
+
+            row_data_lists = [r[s] for s in channel_names]
+
+            if time_col:
+                row_data_lists = \
+                    [list(request_times + last_time_s)] + row_data_lists
+                last_time_s += request_s
+
+            row_dicts = [dict(zip(column_names, row))
+                for row in zip(*tuple(row_data_lists))
+            ]
+            csv_writer.writerows(row_dicts)
+
+            request_count += 1
+            packet_count += r['numPackets']
+
+            if (_finish_up or
+                (n_requests is not None and request_count >= n_requests)):
+
+                break
+        else:
+            # Got no data back from our read.
+            # This only happens if your stream isn't faster than the USB
+            # read timeout, ~1 sec.
+            # TODO should i be warning / erring in this case?
+            print("No data ; {}".format(datetime.now()))
+
+    if verbose:
+        stop = datetime.now()
+
+        sampleTotal = packet_count * d.streamSamplesPerPacket
+
+        scanTotal = sampleTotal / len(input_channels)
+        print("%s requests with %s packets per request with %s samples "
+            "per packet = %s samples total." % (request_count,
+            (float(packet_count)/request_count),
+            d.streamSamplesPerPacket, sampleTotal
+        ))
+        print("%s samples were lost due to errors." % missed)
+        sampleTotal -= missed
+        print("Adjusted number of samples = %s" % sampleTotal)
+
+        print('sampleTotal * all_channel_sample_dt = ',
+            sampleTotal * all_channel_sample_dt
+        )
+
+        runTime = ((stop-start).seconds +
+            float((stop-start).microseconds) / 1000000
+        )
+        # TODO why does this difference seem to depend on
+        # actual_duration_s?  does that mean that the timing between
+        # samples is wrong in some places, or just that the startup /
+        # shutdown of the stream takes longer in some cases? how to
+        # test? maybe measure a reference square wave ~2-4x slower than
+        # sample rate?
+        print('runTime - actual_duration_s:',
+            runTime - actual_duration_s
+        )
+        print("The experiment took %s seconds." % runTime)
+        print("Actual Scan Rate = %s Hz" % scan_frequency)
+        # TODO TODO what causes discrepancies between these and
+        # requested scan rate? should i warn if there's enough of a
+        # difference? important? any offset between values yielded by
+        # streamData, or just at beginning / end?
+        # TODO test again now that break doesn't wait for one un-used yield
+        # of the stream object
+        print("Timed Scan Rate = %s scans / %s seconds = %s Hz" %
+              (scanTotal, runTime, float(scanTotal)/runTime))
+        print("Timed Sample Rate = %s samples / %s seconds = %s Hz" %
+              (sampleTotal, runTime, float(sampleTotal)/runTime))
+
+    # The atexit handlers will run after the labjack node that calls this
+    # function exits. Letting SIGTERM (or maybe even un-handled SIGINT?) kill
+    # this process would not have the handlers run.  Not calling `sys.exit`
+    # here, because that prints something to ROS output.
 
 
 if __name__ == '__main__':

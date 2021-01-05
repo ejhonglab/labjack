@@ -19,13 +19,13 @@ labjack/time_col: True
 # If set, this must contain a key for each element in labjack/input_channels
 labjack/input_channel_names: {'0': pid_v}
 
-# If not specified, will record until ROS shuts down (though the cleanup in this
-# case has not yet been tested).
-labjack/duration_s: 20.0
+# If not specified, will record until ROS shuts down (specifically until it
+# receives the SIGINT signal in the process).
+#labjack/duration_s: 20.0
 
 # Refers to another rosparam that contains the name of the directory that
 # csv_filename should be saved within.
-labjack/csv_dir_rosparam: multi_tracker/basename
+labjack/csv_dir_rosparam: multi_tracker/experiment_basename
 
 # Filename generated CSV should have (excluding directory, which is handled by
 # either whichever parameter csv_dir_rosparam refers to).
