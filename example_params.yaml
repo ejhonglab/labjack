@@ -1,0 +1,33 @@
+
+# Integer indices of inputs to record from on the LabJack.
+# At least for my version of the U3-HV, 0=AIN0, 1=AIN1, and so on.
+# FIO<x> are not currently supported.
+labjack/input_channels: [0]
+
+# 0,1,2,3 are the options, with 0 being the highest resolution (and the slowest
+# sampling rate).
+labjack/resolution_index: 0
+
+# True if 'time_s' column should be included in CSV output, with time from the
+# start of the recording.
+labjack/time_col: True
+
+# This also makes 'pid' available under /labjack/input_channel_names/0, but that
+# seems like it might be unavoidable.
+# If 0 is not quoted, rosparam load yields an error like:
+# 'ERROR: YAML dictionaries must have string keys.'
+# If set, this must contain a key for each element in labjack/input_channels
+labjack/input_channel_names: {'0': pid_v}
+
+# If not specified, will record until ROS shuts down (though the cleanup in this
+# case has not yet been tested).
+labjack/duration_s: 20.0
+
+# Refers to another rosparam that contains the name of the directory that
+# csv_filename should be saved within.
+labjack/csv_dir_rosparam: multi_tracker/basename
+
+# Filename generated CSV should have (excluding directory, which is handled by
+# either whichever parameter csv_dir_rosparam refers to).
+labjack/csv_filename: labjack_test.csv
+
