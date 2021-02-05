@@ -11,6 +11,7 @@ import atexit
 import signal
 import math
 import csv
+import argparse
 
 import numpy as np
 from LabJackPython import Device
@@ -389,14 +390,50 @@ def stream_to_csv(csv_path, duration_s=None, input_channels=None,
 
 
 if __name__ == '__main__':
-    duration_s = None
-    #duration_s = 600.0
-    #input_channels = [0]
-    input_channels = [1]
-    #input_channels = [0, 1]
-    #input_channel_names = {1: 'valve_control', 0: 'pid'}
-    input_channel_names = {1: 'valve_control'}
-    stream_to_csv('test.csv', duration_s=duration_s,
+    parser = argparse.ArgumentParser()
+    parser.add_argument('csv_fname', help='Filename of CSV output will be '
+        'streamed to.'
+    )
+    parser.add_argument('-d', '--duration', type=float, default=None,
+        help='How many seconds to record for. If not passed, stop recording via'
+        ' Ctrl-C.'
+    )
+    parser.add_argument('-c', '--channels', default='0,1',
+        help='Comma separated list of which AIN channels to use. 0-3, inclusive'
+        ', are valid.'
+    )
+    parser.add_argument('-n', '--names', default=None,
+        help='Comma separated list of CSV column names to use for each '
+        'corresponding AIN channel. Must be of same length as --channels. '
+        'By default, the channel names are used.'
+    )
+    args = parser.parse_args()
+
+    csv_fname = args.csv_fname
+    duration_s = args.duration
+    input_channels = [int(c) for c in args.channels.split(',')]
+    if not all([0 <= c <= 3 for c in input_channels]):
+        raise ValueError('input channels must be numbers from 0 to 3')
+
+    if len(set(input_channels)) != len(input_channels):
+        raise ValueError('input channel numbers must not be repeated')
+
+    names = args.names
+    if names is not None:
+        names = names.split(',')
+        if not all([len(n) > 0 for n in names]):
+            raise ValueError('each column name must be non-zero length')
+
+        if len(input_channels) != len(names):
+            raise ValueError('names must be of same length as channels')
+
+        input_channel_names = dict(zip(input_channels, names))
+    else:
+        input_channel_names = None
+
+    # TODO print/warn about needing to stop recording if duration is None
+
+    stream_to_csv(csv_fname, duration_s=duration_s,
         input_channels=input_channels, input_channel_names=input_channel_names,
         overwrite=True, verbose=False
     )
